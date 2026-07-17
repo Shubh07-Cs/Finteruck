@@ -409,6 +409,15 @@ try {
       });
     },
 
+    // Toggle collapse
+    toggleCollapse: () => {
+      console.log('PreloadAPI: toggleCollapse called');
+      return ipcRenderer.invoke('toggle-collapse').catch(err => {
+        console.error('PreloadAPI: toggleCollapse error:', err);
+        return { error: err.message };
+      });
+    },
+
     // Utility functions for debugging
     log: (message) => {
       console.log('PreloadAPI log:', message);

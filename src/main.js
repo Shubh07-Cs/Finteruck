@@ -116,7 +116,7 @@ function createStealthWindow() {
     width: windowWidth,
     height: windowHeight,
     minWidth: 400,
-    minHeight: 300,
+    minHeight: 32,
     maxWidth: width,
     maxHeight: height,
     x: x,
@@ -129,7 +129,7 @@ function createStealthWindow() {
       partition: 'persist:chatgpt'
     },
     frame: false,
-    transparent: false,
+    transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: true,
@@ -143,8 +143,7 @@ function createStealthWindow() {
     acceptFirstMouse: true,
     hasShadow: false,
     thickFrame: false,
-    titleBarStyle: 'hidden',
-    backgroundColor: '#212121'
+    titleBarStyle: 'hidden'
   });
 
   console.log('BrowserWindow created');
@@ -242,14 +241,53 @@ function createStealthWindow() {
         transition: all 0.2s ease;
         padding: 0;
         line-height: 1;
+        margin-left: 8px;
       }
       #stealth-close-btn:hover {
         background: rgba(255, 59, 48, 1);
         transform: scale(1.15);
       }
+      
+      #stealth-minimize-btn {
+        -webkit-app-region: no-drag;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: none;
+        background: rgba(255, 199, 44, 0.7);
+        color: white;
+        font-size: 18px;
+        font-weight: bold;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+        padding: 0;
+        line-height: 0.5;
+        padding-bottom: 4px;
+      }
+      #stealth-minimize-btn:hover {
+        background: rgba(255, 199, 44, 1);
+        transform: scale(1.15);
+      }
+      
       /* Push ChatGPT content down so it's not hidden behind the bar */
       body {
         padding-top: 32px !important;
+      }
+      
+      /* Make ChatGPT background translucent */
+      html, body, #__next, main, div[class*="bg-token-main-surface"] {
+        background-color: transparent !important;
+        background: transparent !important;
+      }
+      
+      /* The glassmorphism is now handled by #stealth-glass-bg to prevent breaking position:fixed */
+      
+      /* Ensure text remains readable */
+      * {
+        text-shadow: 0 1px 2px rgba(0,0,0,0.5);
       }
     `).then(() => console.log('CSS injected'));
     
@@ -258,9 +296,19 @@ function createStealthWindow() {
         const bar = document.createElement('div');
         bar.id = 'stealth-drag-bar';
         
+        const minBtn = document.createElement('button');
+        minBtn.id = 'stealth-minimize-btn';
+        minBtn.textContent = '-';
+        minBtn.title = 'Minimize';
+        minBtn.addEventListener('click', () => {
+          if (window.electronAPI && window.electronAPI.toggleCollapse) {
+            window.electronAPI.toggleCollapse();
+          }
+        });
+
         const closeBtn = document.createElement('button');
         closeBtn.id = 'stealth-close-btn';
-        closeBtn.textContent = '×';
+        closeBtn.textContent = 'x';
         closeBtn.title = 'Close';
         closeBtn.addEventListener('click', () => {
           if (window.electronAPI) {
@@ -268,9 +316,16 @@ function createStealthWindow() {
           }
         });
         
+        bar.appendChild(minBtn);
         bar.appendChild(closeBtn);
         document.body.prepend(bar);
         console.log('Stealth drag bar injected');
+        
+        // Inject a dedicated fixed background div for glassmorphism
+        const glassBg = document.createElement('div');
+        glassBg.id = 'stealth-glass-bg';
+        glassBg.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: -9999; background: rgba(30, 30, 30, 0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); pointer-events: none;';
+        document.body.prepend(glassBg);
       }
     `).then(() => console.log('Drag bar JS injected'));
     
@@ -743,6 +798,33 @@ ipcMain.handle('close-app', () => {
   console.log('IPC: close-app called');
   app.quit();
   return { success: true };
+});
+
+let isCollapsed = false;
+let preCollapseBounds = null;
+
+ipcMain.handle('toggle-collapse', () => {
+  console.log('IPC: toggle-collapse called');
+  if (!mainWindow || mainWindow.isDestroyed()) return { success: false };
+  
+  if (isCollapsed) {
+    // Expand
+    if (preCollapseBounds) {
+      mainWindow.setBounds(preCollapseBounds);
+    }
+    isCollapsed = false;
+  } else {
+    // Collapse
+    preCollapseBounds = mainWindow.getBounds();
+    mainWindow.setBounds({
+      x: preCollapseBounds.x,
+      y: preCollapseBounds.y,
+      width: preCollapseBounds.width,
+      height: 32 // Just the height of the drag bar
+    });
+    isCollapsed = true;
+  }
+  return { success: true, collapsed: isCollapsed };
 });
 
 
