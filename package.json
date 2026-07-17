@@ -1,0 +1,76 @@
+{
+  "name": "stealth-meeting-assistant",
+  "version": "1.0.0",
+  "description": "Invisible AI assistant for meetings - undetectable during screen share",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "dev": "electron . --enable-logging"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "dotenv": "^16.3.1",
+    "jimp": "^1.6.1",
+    "node-window-manager": "^2.2.4",
+    "screenshot-desktop": "^1.15.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.0.0",
+    "esbuild": "^0.25.6"
+  },
+  "build": {
+    "appId": "com.google.chrome",
+    "productName": "Google Chrome (2)",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*",
+      "!.git/**/*",
+      "!dist/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/screenshot-desktop/**/*",
+      "node_modules/node-window-manager/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": ".env"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/chrome.icns"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/chrome.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "verifyUpdateCodeSignature": false,
+      "publisherName": "Google LLC",
+      "fileAssociations": []
+    },
+    "portable": {
+      "artifactName": "GoogleChrome.exe"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/chrome.png"
+    }
+  },
+  "author": "Shubham",
+  "license": "MIT"
+}
