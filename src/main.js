@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, desktopCapturer } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, desktopCapturer, clipboard, nativeImage } = require('electron');
 
 // CRITICAL: Chromium flags MUST be set before app is ready
 app.commandLine.appendSwitch('enable-media-stream');
@@ -46,6 +46,7 @@ console.log('GEMINI_API_KEY:', process.env.GEMINI_API_KEY ? '✅ Found' : '❌ M
 require('dotenv').config({ path: envPath });
 
 const GeminiService = require('./gemini-service');
+const DeepgramService = require('./deepgram-service');
 
 (async () => {
 
@@ -53,6 +54,10 @@ let mainWindow;
 let screenshots = [];
 let chatContext = [];
 const MAX_SCREENSHOTS = 3;
+
+// Deepgram state
+let deepgramService = null;
+let isDeepgramActive = false;
 
 // Safe IPC sender to prevent "Render frame was disposed" errors during shutdown/reload
 function safeSend(channel, ...args) {
@@ -197,7 +202,7 @@ function createStealthWindow() {
   }
   
   // Content protection will be set AFTER the window shows to prevent Windows from resetting the WDA flag
-
+//*****Line used to remove transparancy*****   
   
   mainWindow.setIgnoreMouseEvents(false);
   
@@ -289,12 +294,52 @@ function createStealthWindow() {
       * {
         text-shadow: 0 1px 2px rgba(0,0,0,0.5);
       }
+
+      /* Deepgram green dot indicator */
+      #stealth-deepgram-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #00ff00;
+        margin-right: auto;
+        margin-left: 10px;
+        display: none;
+        animation: pulse-green 1.5s infinite;
+      }
+      @keyframes pulse-green {
+        0%, 100% { opacity: 1; box-shadow: 0 0 4px #00ff00; }
+        50% { opacity: 0.5; box-shadow: 0 0 8px #00ff00; }
+      }
+
+      /* Deepgram interim text overlay */
+      #stealth-interim-text {
+        position: fixed;
+        top: 34px;
+        left: 0;
+        right: 0;
+        background: rgba(0, 0, 0, 0.75);
+        color: #aaa;
+        font-size: 12px;
+        padding: 4px 10px;
+        z-index: 999998;
+        display: none;
+        font-style: italic;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: none;
+      }
     `).then(() => console.log('CSS injected'));
     
     mainWindow.webContents.executeJavaScript(`
       if (!document.getElementById('stealth-drag-bar')) {
         const bar = document.createElement('div');
         bar.id = 'stealth-drag-bar';
+
+        const dgDot = document.createElement('div');
+        dgDot.id = 'stealth-deepgram-dot';
+        dgDot.title = 'Deepgram listening';
+        bar.appendChild(dgDot);
         
         const minBtn = document.createElement('button');
         minBtn.id = 'stealth-minimize-btn';
@@ -328,6 +373,143 @@ function createStealthWindow() {
         document.body.prepend(glassBg);
       }
     `).then(() => console.log('Drag bar JS injected'));
+
+    // Inject Deepgram audio capture and ChatGPT text injection logic
+    mainWindow.webContents.executeJavaScript(`
+      (function() {
+        let audioStream = null;
+        let audioContext = null;
+        let scriptProcessor = null;
+        let accumulatedText = '';
+
+        if (!window.electronAPI) return;
+
+        // Listen for Deepgram status changes (start/stop)
+        window.electronAPI.onDeepgramStatus(function(status) {
+          const dot = document.getElementById('stealth-deepgram-dot');
+          if (dot) dot.style.display = status.active ? 'block' : 'none';
+          if (status.active) {
+            startAudioCapture();
+          } else {
+            stopAudioCapture();
+          }
+        });
+
+        // Listen for Deepgram transcript results
+        window.electronAPI.onDeepgramTranscript(function(result) {
+          if (result.utteranceEnd) {
+            if (accumulatedText.trim()) {
+              injectAndSend(accumulatedText.trim());
+              accumulatedText = '';
+            }
+            hideInterimText();
+            return;
+          }
+          if (result.isFinal && result.text) {
+            accumulatedText += result.text + ' ';
+            showInterimText(accumulatedText);
+          } else if (!result.isFinal && result.text) {
+            showInterimText(accumulatedText + result.text);
+          }
+        });
+
+        async function startAudioCapture() {
+          try {
+            const sourceId = await window.electronAPI.getDesktopAudioSource();
+            if (!sourceId) { console.error('No desktop audio source'); return; }
+
+            audioStream = await navigator.mediaDevices.getUserMedia({
+              audio: { mandatory: { chromeMediaSource: 'desktop' } },
+              video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId } }
+            });
+            // Stop video tracks immediately - we only need audio
+            audioStream.getVideoTracks().forEach(function(t) { t.stop(); });
+
+            audioContext = new AudioContext({ sampleRate: 16000 });
+            const source = audioContext.createMediaStreamSource(audioStream);
+            scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            // Silent gain node to prevent audio echo
+            const silentGain = audioContext.createGain();
+            silentGain.gain.value = 0;
+
+            scriptProcessor.onaudioprocess = function(event) {
+              const float32 = event.inputBuffer.getChannelData(0);
+              const int16 = new Int16Array(float32.length);
+              for (let i = 0; i < float32.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32[i]));
+                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+              }
+              window.electronAPI.sendAudioChunk(int16.buffer);
+            };
+
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(silentGain);
+            silentGain.connect(audioContext.destination);
+            console.log('Deepgram audio capture started');
+          } catch (err) {
+            console.error('Audio capture failed:', err);
+          }
+        }
+
+        function stopAudioCapture() {
+          if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+          if (audioContext) { audioContext.close(); audioContext = null; }
+          if (audioStream) { audioStream.getTracks().forEach(function(t) { t.stop(); }); audioStream = null; }
+          accumulatedText = '';
+          hideInterimText();
+          console.log('Deepgram audio capture stopped');
+        }
+
+        function showInterimText(text) {
+          let el = document.getElementById('stealth-interim-text');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'stealth-interim-text';
+            document.body.appendChild(el);
+          }
+          el.textContent = '[listening] ' + text;
+          el.style.display = 'block';
+        }
+
+        function hideInterimText() {
+          const el = document.getElementById('stealth-interim-text');
+          if (el) { el.style.display = 'none'; el.textContent = ''; }
+        }
+
+        function injectAndSend(text) {
+          // Find ChatGPT input (handles both textarea and contenteditable)
+          const textarea = document.querySelector('#prompt-textarea');
+          if (!textarea) { console.error('ChatGPT input not found'); return; }
+
+          if (textarea.tagName === 'TEXTAREA') {
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+              window.HTMLTextAreaElement.prototype, 'value'
+            ).set;
+            nativeSetter.call(textarea, text);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          } else {
+            // Contenteditable div (ProseMirror)
+            textarea.focus();
+            textarea.innerHTML = '';
+            const p = document.createElement('p');
+            p.textContent = text;
+            textarea.appendChild(p);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+
+          // Auto-send after brief delay (user can also manually send earlier)
+          setTimeout(function() {
+            const sendBtn = document.querySelector('[data-testid="send-button"]') ||
+                            document.querySelector('button[aria-label*="Send"]');
+            if (sendBtn && !sendBtn.disabled) {
+              sendBtn.click();
+              console.log('Deepgram: auto-sent to ChatGPT');
+            }
+          }, 500);
+        }
+      })();
+    `).then(() => console.log('Deepgram audio JS injected'));
     
     mainWindow.show();
     mainWindow.focus();
@@ -335,6 +517,8 @@ function createStealthWindow() {
     
     // CRITICAL: Apply content protection AFTER the window is shown. 
     // On Windows, calling show() on a hidden window can reset the WDA flag.
+
+//*************************** */
     mainWindow.setContentProtection(true);
     console.log('Content protection enabled for stealth (post-show)');
   });
@@ -362,9 +546,24 @@ function registerStealthShortcuts() {
   globalShortcut.register('CommandOrControl+Alt+Shift+S', async () => {
     await takeStealthScreenshot();
   });
+  
+  // Easier shortcut for interview stealth
+  globalShortcut.register('Alt+S', async () => {
+    await takeStealthScreenshot();
+  });
 
   globalShortcut.register('CommandOrControl+Alt+Shift+A', async () => {
     safeSend('trigger-analyze');
+  });
+  
+  // Easier shortcut for interview stealth
+  globalShortcut.register('Alt+A', async () => {
+    safeSend('trigger-analyze');
+  });
+
+  // Deepgram live transcription toggle
+  globalShortcut.register('Alt+R', async () => {
+    await toggleDeepgram();
   });
 
   globalShortcut.register('CommandOrControl+Alt+Shift+X', () => {
@@ -495,12 +694,7 @@ function moveToPosition(position) {
 async function takeStealthScreenshot() {
   try {
     console.log('Taking stealth screenshot...');
-    const currentOpacity = mainWindow.getOpacity();
     
-    mainWindow.setOpacity(0.01);
-    
-    await new Promise(resolve => setTimeout(resolve, 200));
-
     // Use app data directory for screenshots in production
     const screenshotsDir = isDevelopment()
       ? path.join(__dirname, '..', '.stealth_screenshots')
@@ -513,6 +707,10 @@ async function takeStealthScreenshot() {
     const screenshotPath = path.join(screenshotsDir, `stealth-${Date.now()}.png`);
     await screenshot({ filename: screenshotPath });
     
+    // Copy the stealth screenshot directly to the clipboard!
+    const image = nativeImage.createFromPath(screenshotPath);
+    clipboard.writeImage(image);
+    
     screenshots.push(screenshotPath);
     if (screenshots.length > MAX_SCREENSHOTS) {
       const oldPath = screenshots.shift();
@@ -521,8 +719,6 @@ async function takeStealthScreenshot() {
       }
     }
     
-    mainWindow.setOpacity(currentOpacity);
-    
     console.log(`Screenshot saved: ${screenshotPath}`);
     console.log(`Total screenshots: ${screenshots.length}`);
     
@@ -530,7 +726,6 @@ async function takeStealthScreenshot() {
     
     return screenshotPath;
   } catch (error) {
-    mainWindow.setOpacity(1.0);
     console.error('Stealth screenshot error:', error);
     throw error;
   }
@@ -796,8 +991,63 @@ ipcMain.handle('clear-stealth', () => {
 
 ipcMain.handle('close-app', () => {
   console.log('IPC: close-app called');
-  app.quit();
+  if (deepgramService) { deepgramService.stop(); deepgramService = null; }
+  app.exit(0);
+  process.exit(0);
   return { success: true };
+});
+
+// --- Deepgram IPC handlers ---
+
+async function toggleDeepgram() {
+  if (isDeepgramActive) {
+    console.log('Stopping Deepgram...');
+    if (deepgramService) {
+      deepgramService.stop();
+      deepgramService = null;
+    }
+    isDeepgramActive = false;
+    safeSend('deepgram-status', { active: false });
+    console.log('Deepgram stopped');
+  } else {
+    const apiKey = process.env.DEEPGRAM;
+    if (!apiKey) {
+      console.error('No DEEPGRAM API key found in .env');
+      return;
+    }
+    console.log('Starting Deepgram...');
+    deepgramService = new DeepgramService(apiKey);
+
+    deepgramService.onTranscript((result) => {
+      safeSend('deepgram-transcript', result);
+    });
+
+    try {
+      await deepgramService.start();
+      isDeepgramActive = true;
+      safeSend('deepgram-status', { active: true });
+      console.log('Deepgram started successfully');
+    } catch (err) {
+      console.error('Failed to start Deepgram:', err.message);
+      deepgramService = null;
+    }
+  }
+}
+
+ipcMain.on('deepgram-audio-chunk', (event, buffer) => {
+  if (deepgramService && isDeepgramActive) {
+    deepgramService.sendAudio(buffer);
+  }
+});
+
+ipcMain.handle('get-desktop-audio-source', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    return sources[0]?.id || null;
+  } catch (err) {
+    console.error('Failed to get desktop sources:', err);
+    return null;
+  }
 });
 
 let isCollapsed = false;

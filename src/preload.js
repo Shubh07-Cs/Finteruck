@@ -418,6 +418,38 @@ try {
       });
     },
 
+    // Deepgram live transcription
+    sendAudioChunk: (buffer) => {
+      ipcRenderer.send('deepgram-audio-chunk', buffer);
+    },
+
+    getDesktopAudioSource: () => {
+      return ipcRenderer.invoke('get-desktop-audio-source').catch(err => {
+        console.error('PreloadAPI: getDesktopAudioSource error:', err);
+        return null;
+      });
+    },
+
+    onDeepgramTranscript: (callback) => {
+      const handler = (event, data) => {
+        try { callback(data); } catch (err) {
+          console.error('PreloadAPI: onDeepgramTranscript callback error:', err);
+        }
+      };
+      ipcRenderer.on('deepgram-transcript', handler);
+      return () => ipcRenderer.removeListener('deepgram-transcript', handler);
+    },
+
+    onDeepgramStatus: (callback) => {
+      const handler = (event, data) => {
+        try { callback(data); } catch (err) {
+          console.error('PreloadAPI: onDeepgramStatus callback error:', err);
+        }
+      };
+      ipcRenderer.on('deepgram-status', handler);
+      return () => ipcRenderer.removeListener('deepgram-status', handler);
+    },
+
     // Utility functions for debugging
     log: (message) => {
       console.log('PreloadAPI log:', message);
