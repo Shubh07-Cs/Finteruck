@@ -380,7 +380,14 @@ function createStealthWindow() {
         let audioStream = null;
         let audioContext = null;
         let scriptProcessor = null;
-        let accumulatedText = '';
+
+        // --- UPGRADED: Turn Coalescer (inspired by Natively) ---
+        // Accumulates transcript segments into complete thoughts before
+        // sending to ChatGPT, preventing fragmented half-sentence prompts.
+        let finalSegments = [];
+        let currentInterim = '';
+        let autoSendTimer = null;
+        const AUTO_SEND_DELAY = 800; // ms after last endpoint before auto-sending
 
         if (!window.electronAPI) return;
 
@@ -397,19 +404,41 @@ function createStealthWindow() {
 
         // Listen for Deepgram transcript results
         window.electronAPI.onDeepgramTranscript(function(result) {
-          if (result.utteranceEnd) {
-            if (accumulatedText.trim()) {
-              injectAndSend(accumulatedText.trim());
-              accumulatedText = '';
-            }
-            hideInterimText();
+
+          // --- UPGRADED: Dual endpoint handling (speech_final + utterance_end) ---
+          if (result.endpoint) {
+            // An endpoint means the speaker paused or finished.
+            // Start a short timer — if no new speech arrives, auto-send.
+            if (autoSendTimer) clearTimeout(autoSendTimer);
+
+            autoSendTimer = setTimeout(function() {
+              autoSendTimer = null;
+              const fullText = finalSegments.join(' ').trim();
+              if (fullText) {
+                injectAndSend(fullText);
+              }
+              finalSegments = [];
+              currentInterim = '';
+              hideInterimText();
+            }, AUTO_SEND_DELAY);
             return;
           }
+
           if (result.isFinal && result.text) {
-            accumulatedText += result.text + ' ';
-            showInterimText(accumulatedText);
+            // Final segment — accumulate into the turn
+            finalSegments.push(result.text);
+            currentInterim = '';
+
+            // Cancel any pending auto-send (more speech is coming)
+            if (autoSendTimer) { clearTimeout(autoSendTimer); autoSendTimer = null; }
+
+            // Show accumulated text in the overlay
+            showInterimText(finalSegments.join(' '));
+
           } else if (!result.isFinal && result.text) {
-            showInterimText(accumulatedText + result.text);
+            // Interim (partial) — show live preview but don't accumulate
+            currentInterim = result.text;
+            showInterimText(finalSegments.join(' ') + ' ' + currentInterim);
           }
         });
 
@@ -425,9 +454,13 @@ function createStealthWindow() {
             // Stop video tracks immediately - we only need audio
             audioStream.getVideoTracks().forEach(function(t) { t.stop(); });
 
+            // --- UPGRADED: 16kHz sample rate for Deepgram linear16 ---
             audioContext = new AudioContext({ sampleRate: 16000 });
             const source = audioContext.createMediaStreamSource(audioStream);
-            scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            // --- UPGRADED: Smaller buffer (2048 samples = 128ms at 16kHz) ---
+            // Down from 4096 (256ms). Halves the audio latency.
+            scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
 
             // Silent gain node to prevent audio echo
             const silentGain = audioContext.createGain();
@@ -446,17 +479,19 @@ function createStealthWindow() {
             source.connect(scriptProcessor);
             scriptProcessor.connect(silentGain);
             silentGain.connect(audioContext.destination);
-            console.log('Deepgram audio capture started');
+            console.log('Deepgram audio capture started (2048 buffer, 16kHz)');
           } catch (err) {
             console.error('Audio capture failed:', err);
           }
         }
 
         function stopAudioCapture() {
+          if (autoSendTimer) { clearTimeout(autoSendTimer); autoSendTimer = null; }
           if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
           if (audioContext) { audioContext.close(); audioContext = null; }
           if (audioStream) { audioStream.getTracks().forEach(function(t) { t.stop(); }); audioStream = null; }
-          accumulatedText = '';
+          finalSegments = [];
+          currentInterim = '';
           hideInterimText();
           console.log('Deepgram audio capture stopped');
         }
@@ -478,6 +513,11 @@ function createStealthWindow() {
         }
 
         function injectAndSend(text) {
+          // --- UPGRADED: Interview Copilot prompt prefix ---
+          // Wraps the transcribed question with a directive so ChatGPT
+          // generates concise, interview-ready answers instead of essays.
+          const prompt = '[You are an invisible interview copilot. The interviewer just said the following. Give a direct, concise answer in 2-3 short bullet points. If it is a coding question, put the code first. Do NOT repeat the question.]\\n\\n' + text;
+
           // Find ChatGPT input (handles both textarea and contenteditable)
           const textarea = document.querySelector('#prompt-textarea');
           if (!textarea) { console.error('ChatGPT input not found'); return; }
@@ -486,14 +526,14 @@ function createStealthWindow() {
             const nativeSetter = Object.getOwnPropertyDescriptor(
               window.HTMLTextAreaElement.prototype, 'value'
             ).set;
-            nativeSetter.call(textarea, text);
+            nativeSetter.call(textarea, prompt);
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
           } else {
             // Contenteditable div (ProseMirror)
             textarea.focus();
             textarea.innerHTML = '';
             const p = document.createElement('p');
-            p.textContent = text;
+            p.textContent = prompt;
             textarea.appendChild(p);
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
           }
@@ -506,7 +546,7 @@ function createStealthWindow() {
               sendBtn.click();
               console.log('Deepgram: auto-sent to ChatGPT');
             }
-          }, 500);
+          }, 400);
         }
       })();
     `).then(() => console.log('Deepgram audio JS injected'));
