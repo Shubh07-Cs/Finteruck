@@ -66,9 +66,10 @@ class DeepgramService {
         // endpointing: 300ms means Deepgram finalizes a segment after just
         // 300ms of silence (down from the default 460ms).
         endpointing: '300',
-        // utterance_end_ms: 1000ms means the "utterance finished" event fires
-        // after 1s of total silence (down from our old 1500ms).
-        utterance_end_ms: '1000',
+        // utterance_end_ms: 3000ms — wait 3 full seconds of silence before
+        // declaring the utterance "done". Prevents premature sends when
+        // interviewers pause to think ("hmm...", "so...", "let me think...").
+        utterance_end_ms: '3000',
         vad_events: 'true',
       });
 

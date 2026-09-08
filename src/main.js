@@ -387,7 +387,23 @@ function createStealthWindow() {
         let finalSegments = [];
         let currentInterim = '';
         let autoSendTimer = null;
-        const AUTO_SEND_DELAY = 800; // ms after last endpoint before auto-sending
+        // After Deepgram's utterance_end (3s silence), wait 1.5s more before
+        // auto-sending. Total patience: ~4.5s of silence. Interviewers rarely
+        // pause that long mid-question, so half-sends are eliminated.
+        const AUTO_SEND_DELAY = 1500;
+
+        // --- Alt+Enter Manual Send Support ---
+        // Expose a flush function so the main process can trigger immediate send
+        window.__deepgramFlushNow = function() {
+          if (autoSendTimer) { clearTimeout(autoSendTimer); autoSendTimer = null; }
+          const fullText = finalSegments.join(' ').trim();
+          if (fullText) {
+            injectAndSend(fullText);
+          }
+          finalSegments = [];
+          currentInterim = '';
+          hideInterimText();
+        };
 
         if (!window.electronAPI) return;
 
@@ -513,10 +529,8 @@ function createStealthWindow() {
         }
 
         function injectAndSend(text) {
-          // --- UPGRADED: Interview Copilot prompt prefix ---
-          // Wraps the transcribed question with a directive so ChatGPT
-          // generates concise, interview-ready answers instead of essays.
-          const prompt = '[You are an invisible interview copilot. The interviewer just said the following. Give a direct, concise answer in 2-3 short bullet points. If it is a coding question, put the code first. Do NOT repeat the question.]\\n\\n' + text;
+          // --- Ultra-fast, student-tone prompt ---
+          const prompt = '[RULES: Answer like a normal college student talking in an interview — casual, simple words, no fancy vocabulary. Sound natural and conversational like you are explaining to a friend. Use correct technical terms only where needed. MAX 2-3 lines. No intro, no filler, no "Sure!", no "Great question!", no repeating the question. For code: just the code + 1-line explanation. Go.]\\n\\n' + text;
 
           // Find ChatGPT input (handles both textarea and contenteditable)
           const textarea = document.querySelector('#prompt-textarea');
@@ -604,6 +618,17 @@ function registerStealthShortcuts() {
   // Deepgram live transcription toggle
   globalShortcut.register('Alt+R', async () => {
     await toggleDeepgram();
+  });
+
+  // Manual send: immediately flush accumulated transcript to ChatGPT
+  // Use when the interviewer has clearly finished and you want a fast answer
+  globalShortcut.register('Alt+Return', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript(
+        'if (window.__deepgramFlushNow) window.__deepgramFlushNow();'
+      ).catch(() => {});
+      console.log('Alt+Enter: Manual flush triggered');
+    }
   });
 
   globalShortcut.register('CommandOrControl+Alt+Shift+X', () => {
